@@ -7214,5 +7214,33 @@
     "A 'return' statement cannot be used inside a class static block.": {
         "category": "Error",
         "code": 18041
+    },
+    "A call to '{0}' can only be made with a monadic type.": {
+        "category": "Error",
+        "code": 50000
+    },
+    "The first statement of '{0}' must contain one monadic bind.": {
+        "category": "Error",
+        "code": 50001
+    },
+    "Invalid statement in the body of '{0}'.": {
+        "category": "Error",
+        "code": 50002
+    },
+    "A call to '{0}' cannot be made in this context.": {
+        "category": "Error",
+        "code": 50003
+    },
+    "Only 'const' bindings are allowed in the context of '{0}'.": {
+        "category": "Error",
+        "code": 50004
+    },
+    "Cannot find extensions for '{0}'": {
+        "category": "Error",
+        "code": 50005
+    },
+    "Cannot find extension '{0}' for '{1}'": {
+        "category": "Error",
+        "code": 50006
     }
 }

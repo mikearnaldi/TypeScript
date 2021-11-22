@@ -2,11 +2,38 @@
 namespace ts {
     const ambientModuleSymbolRegex = /^".+"$/;
     const anon = "(anonymous)" as __String & string;
+    const etsSymbols = new WeakMap<Symbol, Type>();
 
     let nextSymbolId = 1;
     let nextNodeId = 1;
     let nextMergeId = 1;
     let nextFlowId = 1;
+
+    const invertedBinaryOp = {
+        [SyntaxKind.LessThanToken]: "<"as __String,
+        [SyntaxKind.GreaterThanToken]: ">" as __String,
+        [SyntaxKind.LessThanEqualsToken]: "<=" as __String,
+        [SyntaxKind.GreaterThanEqualsToken]: ">=" as __String,
+        [SyntaxKind.EqualsEqualsToken]: "==" as __String,
+        [SyntaxKind.ExclamationEqualsToken]: "!=" as __String,
+        [SyntaxKind.EqualsEqualsEqualsToken]: "===" as __String,
+        [SyntaxKind.ExclamationEqualsEqualsToken]: "!==" as __String,
+        [SyntaxKind.PlusToken]: "+" as __String,
+        [SyntaxKind.MinusToken]: "-" as __String,
+        [SyntaxKind.AsteriskAsteriskToken]: "**" as __String,
+        [SyntaxKind.AsteriskToken]: "*" as __String,
+        [SyntaxKind.SlashToken]: "/" as __String,
+        [SyntaxKind.PercentToken]: "%" as __String,
+        [SyntaxKind.LessThanLessThanToken]: "<<" as __String,
+        [SyntaxKind.GreaterThanGreaterThanToken]: ">>" as __String,
+        [SyntaxKind.GreaterThanGreaterThanGreaterThanToken]: ">>>" as __String,
+        [SyntaxKind.AmpersandToken]: "&" as __String,
+        [SyntaxKind.BarToken]: "|" as __String,
+        [SyntaxKind.CaretToken]: "^" as __String,
+        [SyntaxKind.AmpersandAmpersandToken]: "&&" as __String,
+        [SyntaxKind.BarBarToken]: "||" as __String,
+        [SyntaxKind.QuestionQuestionToken]: "??" as __String
+    } as const;
 
     const enum IterationUse {
         AllowsSyncIterablesFlag = 1 << 0,
@@ -9682,6 +9709,13 @@ namespace ts {
         }
 
         function getTypeOfSymbol(symbol: Symbol): Type {
+            if (etsSymbols.has(symbol)) {
+                return etsSymbols.get(symbol)!;
+            }
+            return getTypeOfSymbolOriginal(symbol);
+        }
+
+        function getTypeOfSymbolOriginal(symbol: Symbol): Type {
             const checkFlags = getCheckFlags(symbol);
             if (checkFlags & CheckFlags.DeferredType) {
                 return getTypeOfSymbolWithDeferredType(symbol);
@@ -28308,7 +28342,64 @@ namespace ts {
                 && getThisContainer(node, /*includeArrowFunctions*/ true) === getDeclaringConstructor(prop);
         }
 
+        //
+        // ETS_EXTENSION_BEGIN
+        //
+        function checkPropertyAccessForExtension(node: PropertyAccessExpression | QualifiedName, _left: Expression | QualifiedName, leftType: Type, right: Identifier | PrivateIdentifier, _checkMode: CheckMode | undefined) {
+            const inType = getPropertiesOfType(leftType).findIndex((p) => p.escapedName === right.escapedText) !== -1;
+
+            if (
+                !inType &&
+                isCallExpression(node.parent) &&
+                leftType.symbol
+            ) {
+                const extensions = getSourceFileOfNode(node).ets_extensions;
+
+                if (extensions && extensions.has(leftType.symbol) && extensions.get(leftType.symbol)!.has(right.escapedText)) {
+                    const other = extensions.get(leftType.symbol)!.get(right.escapedText)!;
+                    const originalType = getTypeOfNode(other) as ObjectType;
+                    const sig = getSignaturesOfType(originalType, SignatureKind.Call)[0]!;
+                    const targetParam = sig.parameters[0];
+                    const targetParamType = getTypeOfNode(targetParam.valueDeclaration!);
+                    if (leftType.symbol === targetParamType.symbol) {
+                        const thisNew = createSymbol(targetParam.flags, "this" as __String);
+                        thisNew.type = targetParamType;
+                        return createAnonymousType(
+                            other.symbol,
+                            emptySymbols,
+                            [createSignature(
+                                sig.declaration,
+                                sig.typeParameters,
+                                thisNew,
+                                sig.parameters.slice(1, sig.parameters.length),
+                                sig.resolvedReturnType,
+                                sig.resolvedTypePredicate,
+                                sig.minArgumentCount - 1,
+                                sig.flags
+                            )],
+                            [],
+                            []
+                        );
+                    }
+                }
+            }
+        }
+        //
+        // ETS_EXTENSION_END
+        //
         function checkPropertyAccessExpressionOrQualifiedName(node: PropertyAccessExpression | QualifiedName, left: Expression | QualifiedName, leftType: Type, right: Identifier | PrivateIdentifier, checkMode: CheckMode | undefined) {
+            //
+            // ETS_EXTENSION_BEGIN
+            //
+            const forExtension = checkPropertyAccessForExtension(node, left, leftType, right, checkMode);
+
+            if (forExtension) {
+                return forExtension;
+            }
+            //
+            // ETS_EXTENSION_END
+            //
+
             const parentSymbol = getNodeLinks(left).resolvedSymbol;
             const assignmentKind = getAssignmentTargetKind(node);
             const apparentType = getApparentType(assignmentKind !== AssignmentKind.None || isMethodAccessForCall(node) ? getWidenedType(leftType) : leftType);
@@ -29896,7 +29987,7 @@ namespace ts {
                 }
             }
 
-            const candidates = candidatesOutArray || [];
+            let candidates = candidatesOutArray || [];
             // reorderCandidates fills up the candidates array directly
             reorderCandidates(signatures, candidates, callChainFlags);
             if (!candidates.length) {
@@ -29953,6 +30044,35 @@ namespace ts {
             // so we will only accept overloads with arity at least 1 higher than the current number of provided arguments.
             const signatureHelpTrailingComma =
                 !!(checkMode & CheckMode.IsForSignatureHelp) && node.kind === SyntaxKind.CallExpression && node.arguments.hasTrailingComma;
+
+            if (candidates.length === 1) {
+                const signature = candidates[0];
+                const updatedParams: Symbol[] = [];
+                let shouldUpdate = false;
+                for (const p of signature.parameters) {
+                    const type = getTypeOfSymbol(p);
+
+                    if (type.symbol && type.symbol.declarations && type.symbol.declarations.length === 1) {
+                        const isLazyParam = getAllJSDocTags(type.symbol.declarations[0], (_): _ is JSDocTag => _.tagName.escapedText === "ets_lazy_param" ).length > 0;
+                        if (isLazyParam) {
+                            const s = createSymbol(SymbolFlags.None, "$ets_lazy" as __String);
+                            updatedParams.push(s);
+                            shouldUpdate = true;
+                            etsSymbols.set(s, getUnionType([type, (type as TypeReference).resolvedTypeArguments![0]]));
+                            continue;
+                        }
+                    }
+
+                    updatedParams.push(p);
+                }
+                if (shouldUpdate) {
+                    const newSignature = cloneSignature(signature);
+
+                    newSignature.parameters = updatedParams;
+
+                    candidates = [newSignature];
+                }
+            }
 
             // Section 4.12.1:
             // if the candidate list contains one or more signatures for which the type of each argument
@@ -30870,6 +30990,12 @@ namespace ts {
             throw Debug.assertNever(node, "Branch in 'resolveSignature' should be unreachable.");
         }
 
+        function getResolvedSignature(node: CallLikeExpression, candidatesOutArray?: Signature[] | undefined, checkMode?: CheckMode): Signature {
+            const signature = getResolvedSignatureOriginal(node, candidatesOutArray, checkMode);
+
+            return signature;
+        }
+
         /**
          * Resolve a signature of a given call-like expression.
          * @param node a call-like expression to try resolve a signature for
@@ -30877,7 +31003,7 @@ namespace ts {
          *                           the function will fill it up with appropriate candidate signatures
          * @return a signature of the call-like expression or undefined if one can't be found
          */
-        function getResolvedSignature(node: CallLikeExpression, candidatesOutArray?: Signature[] | undefined, checkMode?: CheckMode): Signature {
+        function getResolvedSignatureOriginal(node: CallLikeExpression, candidatesOutArray?: Signature[] | undefined, checkMode?: CheckMode): Signature {
             const links = getNodeLinks(node);
             // If getResolvedSignature has already been called, we will have cached the resolvedSignature.
             // However, it is possible that either candidatesOutArray was not passed in the first time,
@@ -31011,20 +31137,485 @@ namespace ts {
             }
         }
 
+        //
+        // ETS_EXTENSION_BEGIN
+        //
+
+        function checkEtsCustomCall(
+            parent: Node,
+            declaration: FunctionDeclaration,
+            args: Expression[],
+            addDiagnostic: (_: Diagnostic) => void
+        ): Type {
+            const funcType = getTypeOfNode(declaration);
+            const apparentType = getApparentType(funcType);
+            const candidate = getSignaturesOfType(apparentType, SignatureKind.Call)[0]!;
+            const node = factory.createCallExpression(
+                factory.createIdentifier("$ets_custom_call"),
+                [],
+                args
+            );
+
+            setParent(node, parent);
+
+            if (candidate.typeParameters) {
+                const inferenceContext = createInferenceContext(
+                    candidate.typeParameters,
+                    candidate,
+                    InferenceFlags.None
+                );
+
+                const typeArgumentTypes = inferTypeArguments(
+                    node,
+                    candidate,
+                    args,
+                    CheckMode.Inferential,
+                    inferenceContext
+                );
+
+                const signature = getSignatureInstantiation(
+                    candidate,
+                    typeArgumentTypes,
+                    /*isJavascript*/ false,
+                    inferenceContext && inferenceContext.inferredTypeParameters
+                );
+
+                const digs = getSignatureApplicabilityError(
+                    node,
+                    args,
+                    signature,
+                    assignableRelation,
+                    CheckMode.Normal,
+                    /*reportErrors*/ true,
+                    /*containingMessageChain*/ void 0
+                );
+
+                if (digs) {
+                    digs.forEach((dig) => {
+                        addDiagnostic(dig);
+                    });
+                    return errorType;
+                }
+
+                return getReturnTypeOfSignature(signature);
+            }
+
+            const digs = getSignatureApplicabilityError(
+                node,
+                args,
+                candidate,
+                assignableRelation,
+                CheckMode.Normal,
+                /*reportErrors*/ true,
+                /*containingMessageChain*/ void 0
+            );
+
+            if (digs) {
+                digs.forEach((dig) => {
+                    addDiagnostic(dig);
+                });
+                return errorType;
+            }
+
+            return getReturnTypeOfSignature(candidate);
+        }
+
+        function findIndexOfOutput(typeOfTarget: Type) {
+            return !typeOfTarget.symbol.declarations ? -1 : (typeOfTarget.symbol.declarations.flatMap((declaration) => {
+                if (!(isInterfaceDeclaration(declaration) || isClassDeclaration(declaration)) || !declaration.typeParameters) {
+                    return [];
+                }
+
+                const param = getAllJSDocTags(
+                    declaration,
+                    (_): _ is JSDocTag => _.tagName.escapedText === "ets_output"
+                )[0]?.comment;
+
+                if (!param || typeof param !== "string") {
+                    return [];
+                }
+
+                const index = declaration.typeParameters.findIndex((_) => _.name.escapedText === param);
+
+                if (index !== -1) {
+                    return [index];
+                }
+
+                return [];
+            })[0] || -1);
+        }
+
+        function checkEtsAdapterCall(node: CallExpression, _checkMode?: CheckMode): Type {
+            if (!node.arguments || node.arguments.length !== 1) {
+                return errorType;
+            }
+
+            const target = node.arguments[0];
+            const typeOfTarget = getTypeOfNode(target);
+
+            if (!typeOfTarget.symbol || !typeOfTarget.symbol.declarations || typeOfTarget.symbol.declarations.length === 0 || !hasProperty(typeOfTarget, "target")) {
+                error(node, Diagnostics.A_call_to_0_can_only_be_made_with_a_monadic_type, isIdentifier(node.expression) ? node.expression.escapedText.toString() : "$");
+                return errorType;
+            }
+
+            const index = findIndexOfOutput(typeOfTarget);
+
+            if (index === -1) {
+                error(node, Diagnostics.A_call_to_0_can_only_be_made_with_a_monadic_type, isIdentifier(node.expression) ? node.expression.escapedText.toString() : "$");
+                return errorType;
+            }
+
+            return getTypeArguments(typeOfTarget as TypeReference)[index];
+        }
+
+        type EtsAdapterCall = CallExpression & { readonly _ets_brand: "EtsAdapterCall" };
+
+        function isEtsAdapterCall(node: Node): node is EtsAdapterCall {
+            if (!isCallExpression(node)) {
+                return false;
+            }
+
+            const typeOfExpression = getTypeOfNode(node.expression);
+
+            if (typeOfExpression.symbol && typeOfExpression.symbol.valueDeclaration) {
+                return getAllJSDocTags(
+                    typeOfExpression.symbol.valueDeclaration,
+                    (_): _ is JSDocTag => _.tagName.escapedText === "ets_do" && _.comment === "adapter"
+                ).length > 0;
+            }
+
+            return false;
+        }
+
+        type EtsDoCall = CallExpression & { readonly _ets_brand: "EtsDoCall" };
+
+        function isEtsDoCall(node: Node): node is EtsDoCall {
+            if (!isCallExpression(node)) {
+                return false;
+            }
+
+            const typeOfExpression = getTypeOfNode(node.expression);
+
+            if (typeOfExpression.symbol && typeOfExpression.symbol.valueDeclaration) {
+                return getAllJSDocTags(
+                    typeOfExpression.symbol.valueDeclaration,
+                    (_): _ is JSDocTag => _.tagName.escapedText === "ets_do" && _.comment === "Do"
+                ).length > 0;
+            }
+
+            return false;
+        }
+
+        function checkEtsDoCall(node: CallExpression, checkMode?: CheckMode): Type {
+            const type = checkCallExpressionOriginal(node, checkMode);
+
+            if (isErrorType(type) || node.arguments.length === 0) {
+                return type;
+            }
+
+            const nameOfDo = isIdentifier(node.expression) ? node.expression.escapedText.toString() : "Do";
+
+            if (!isArrowFunction(node.arguments[0])) {
+                return type;
+            }
+
+            const body = node.arguments[0].body;
+
+            if (!isBlock(body)) {
+                return type;
+            }
+
+            if (body.statements.length === 0) {
+                error(node.arguments[0], Diagnostics.The_first_statement_of_0_must_contain_one_monadic_bind, nameOfDo);
+                return errorType;
+            }
+
+            let adapterCall: EtsAdapterCall | undefined;
+
+            function firstAdapterVisitor(node: Node): Node {
+                if (isEtsAdapterCall(node)) {
+                    if (!adapterCall) {
+                        adapterCall = node;
+                    }
+                    return node;
+                }
+                return visitEachChild(node, firstAdapterVisitor, nullTransformationContext);
+            }
+
+            visitEachChild(body.statements[0], firstAdapterVisitor, nullTransformationContext);
+
+            if (!adapterCall) {
+                error(body.statements[0], Diagnostics.The_first_statement_of_0_must_contain_one_monadic_bind, nameOfDo);
+                return errorType;
+            }
+
+            const relevantBinds: EtsAdapterCall[] = [];
+
+            function disallowAdapterCalls(node: Node): Type | undefined {
+                let invalidCall: EtsAdapterCall | undefined;
+
+                const visitor = (node: Node): Node => {
+                    if (isEtsDoCall(node)) {
+                        return node;
+                    }
+                    if (isEtsAdapterCall(node)) {
+                        if (!invalidCall) {
+                            invalidCall = node;
+                        }
+                        return node;
+                    }
+                    return visitEachChild(node, visitor, nullTransformationContext);
+                };
+
+                visitNode(node, visitor);
+
+                if (invalidCall) {
+                    error(
+                        invalidCall,
+                        Diagnostics.A_call_to_0_cannot_be_made_in_this_context,
+                        isIdentifier(invalidCall.expression) ? invalidCall.expression.escapedText.toString() : "$"
+                    );
+                    return errorType;
+                }
+            }
+
+            function checkBody(statements: Iterable<Statement>): Type | undefined {
+                for (const statement of Array.from(statements)) {
+                    if (isVariableStatement(statement)) {
+                        if (statement.declarationList.declarations.length === 1) {
+                            if (!(statement.declarationList.flags & NodeFlags.Const)) {
+                                error(statement.declarationList, Diagnostics.Only_const_bindings_are_allowed_in_the_context_of_0, nameOfDo);
+                                return errorType;
+                            }
+                            const declaration = statement.declarationList.declarations[0];
+
+                            if (!declaration.initializer) {
+                                error(statement, Diagnostics.Invalid_statement_in_the_body_of_0, nameOfDo);
+                                return errorType;
+                            }
+                            else {
+                                if (isEtsAdapterCall(declaration.initializer)) {
+                                    relevantBinds.push(declaration.initializer);
+                                }
+                                else {
+                                    const hasError = disallowAdapterCalls(statement);
+                                    if (hasError) {
+                                        return hasError;
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            error(statement, Diagnostics.Invalid_statement_in_the_body_of_0, nameOfDo);
+                            return errorType;
+                        }
+                    }
+                    else if (isFunctionDeclaration(statement)) {
+                        const hasError = disallowAdapterCalls(statement);
+                        if (hasError) {
+                            return hasError;
+                        }
+                    }
+                    else if (isIfStatement(statement)) {
+                        const hasError = disallowAdapterCalls(statement.expression);
+                        if (hasError) {
+                            return hasError;
+                        }
+                        if (isBlock(statement.thenStatement)){
+                            const hasErrorThen = checkBody(statement.thenStatement.statements);
+                            if (hasErrorThen) {
+                                return hasErrorThen;
+                            }
+                        }
+                        else {
+                            const hasErrorThen = checkBody([statement.thenStatement]);
+                            if (hasErrorThen) {
+                                return hasErrorThen;
+                            }
+                        }
+                        if (statement.elseStatement) {
+                            if (isBlock(statement.elseStatement)){
+                                const hasErrorElse = checkBody(statement.elseStatement.statements);
+                                if (hasErrorElse) {
+                                    return hasErrorElse;
+                                }
+                            }
+                            else {
+                                const hasErrorElse = checkBody([statement.elseStatement]);
+                                if (hasErrorElse) {
+                                    return hasErrorElse;
+                                }
+                            }
+                        }
+                    }
+                    else if (isExpressionStatement(statement) || isReturnStatement(statement)) {
+                        if (statement.expression && isEtsAdapterCall(statement.expression)) {
+                            relevantBinds.push(statement.expression);
+                        }
+                        else {
+                            const hasError = disallowAdapterCalls(statement);
+                            if (hasError) {
+                                return hasError;
+                            }
+                        }
+                    }
+                    else if (isEmptyStatement(statement)) {
+                        // no-op
+                    }
+                    else {
+                        error(statement, Diagnostics.Invalid_statement_in_the_body_of_0, nameOfDo);
+                        return errorType;
+                    }
+                }
+            }
+
+            const checkBodyError = checkBody(body.statements);
+
+            if (checkBodyError) {
+                return checkBodyError;
+            }
+
+            function getExtension(node: Node, type: Type, symbol: Symbol, extensionStr: string) {
+                const sourceFileExtensions = getSourceFileOfNode(node).ets_extensions;
+
+                if (!sourceFileExtensions || !sourceFileExtensions.has(symbol)) {
+                    error(node, Diagnostics.Cannot_find_extensions_for_0, typeToString(type));
+                    return { error: errorType };
+                }
+
+                const extensions = sourceFileExtensions.get(symbol)!;
+
+                if (!extensions.has(extensionStr as __String)) {
+                    error(node, Diagnostics.Cannot_find_extension_0_for_1, extensionStr, typeToString(type));
+                    return { error: errorType };
+                }
+
+                const extension = extensions.get(extensionStr as __String)!;
+
+                return { extension };
+            }
+
+            let weakestType = getTypeOfNode(adapterCall.arguments[0]) as TypeReference;
+            let weakestNode = adapterCall.arguments[0];
+
+            if (!weakestType.resolvedTypeArguments) {
+                return type;
+            }
+
+            let typeOfRelevantBinds: Type[] = [];
+
+            while (1) {
+                const extension = getExtension(weakestNode, weakestType, weakestType.symbol, "identity");
+
+                if (extension.error) {
+                    return extension.error;
+                }
+
+                const identity = extension.extension;
+
+                for (const bind of relevantBinds) {
+                    const errors: Diagnostic[] = [];
+                    const typeOfBind = checkEtsCustomCall(node, identity, [bind.arguments[0]], (_) => errors.push(_));
+
+                    const invertedNode = bind.arguments[0];
+                    const invertedType = getTypeOfNode(invertedNode);
+                    const invertedExtension = getExtension(bind.arguments[0], invertedType, invertedType.symbol, "identity");
+
+                    if (invertedExtension.error) {
+                        return invertedExtension.error;
+                    }
+
+                    if (isErrorType(typeOfBind)) {
+                        const invertedId = invertedExtension.extension;
+
+                        const invertedTypeOfBind = checkEtsCustomCall(node, invertedId, [weakestNode], (_) => errors.push(_));
+
+                        if (!isErrorType(invertedTypeOfBind)) {
+                            weakestType = invertedType as TypeReference;
+                            weakestNode = invertedNode;
+                            typeOfRelevantBinds = [];
+                            continue;
+                        }
+
+                        errors.forEach((_) => diagnostics.add(_));
+
+                        return errorType;
+                    }
+
+                    typeOfRelevantBinds.push(typeOfBind);
+                }
+
+                break;
+            }
+
+            const outputIndex = findIndexOfOutput(weakestType);
+
+            const returnType = cloneTypeReference(weakestType);
+
+            const resolvedTypeArguments = [...returnType.resolvedTypeArguments!];
+
+            resolvedTypeArguments[outputIndex] = type;
+
+            if (weakestType.target.variances) {
+                for (let i = 0; i < resolvedTypeArguments.length; i++) {
+                    if (i !== outputIndex) {
+                        const variance = weakestType.target.variances[i];
+
+                        if (variance === VarianceFlags.Contravariant) {
+                            resolvedTypeArguments[i] = getIntersectionType(
+                                typeOfRelevantBinds.map((b) => (b as GenericType).resolvedTypeArguments![i])
+                            );
+                        }
+                        if (variance === VarianceFlags.Covariant) {
+                            resolvedTypeArguments[i] = getUnionType(
+                                typeOfRelevantBinds.map((b) => (b as GenericType).resolvedTypeArguments![i])
+                            );
+                        }
+                    }
+                }
+            }
+
+            returnType.resolvedTypeArguments = resolvedTypeArguments;
+
+            return returnType;
+        }
+
+        function checkCallExpression(node: CallExpression | NewExpression, checkMode?: CheckMode): Type {
+            if (isEtsDoCall(node)) {
+                return checkEtsDoCall(node, checkMode);
+            }
+
+            return checkCallExpressionOriginal(node, checkMode);;
+        }
+
+        //
+        // ETS_EXTENSION_END
+        //
+
         /**
          * Syntactically and semantically checks a call or new expression.
          * @param node The call/new expression to be checked.
          * @returns On success, the expression's signature's return type. On failure, anyType.
          */
-        function checkCallExpression(node: CallExpression | NewExpression, checkMode?: CheckMode): Type {
+        function checkCallExpressionOriginal(node: CallExpression | NewExpression, checkMode?: CheckMode): Type {
             if (!checkGrammarTypeArguments(node, node.typeArguments)) checkGrammarArguments(node.arguments);
 
             const signature = getResolvedSignature(node, /*candidatesOutArray*/ undefined, checkMode);
+
             if (signature === resolvingSignature) {
                 // CheckMode.SkipGenericFunctions is enabled and this is a call to a generic function that
                 // returns a function type. We defer checking and return nonInferrableType.
                 return nonInferrableType;
             }
+
+            //
+            // ETS_EXTENSION_BEGIN
+            //
+            if (isEtsAdapterCall(node)) {
+                return checkEtsAdapterCall(node, checkMode);
+            }
+            // ETS_EXTENSION_END
+            //
 
             checkDeprecatedSignature(signature, node);
 
@@ -32904,6 +33495,23 @@ namespace ts {
             const trampoline = createBinaryExpressionTrampoline(onEnter, onLeft, onOperator, onRight, onExit, foldState);
 
             return (node: BinaryExpression, checkMode: CheckMode | undefined) => {
+                const leftType = getTypeOfNode(node.left);
+
+                // @ts-expect-error
+                const operator: __String | undefined = invertedBinaryOp[node.operatorToken.kind];
+                const operators = getSourceFileOfNode(node).ets_operators;
+
+                if (operator && leftType.symbol && operators && operators.has(leftType.symbol)) {
+                    if (operators.get(leftType.symbol)!.has(operator)) {
+                        return checkEtsCustomCall(
+                            node,
+                            operators.get(leftType.symbol)!.get(operator)!,
+                            [node.left, node.right],
+                            (_) => diagnostics.add(_)
+                        );
+                    }
+                }
+
                 const result = trampoline(node, checkMode);
                 Debug.assertIsDefined(result);
                 return result;
@@ -42185,6 +42793,59 @@ namespace ts {
             return getDeclarationOfKind(moduleSymbol, SyntaxKind.SourceFile);
         }
 
+        //
+        // ETS_EXTENSION_BEGIN
+        //
+        function initializeEtsTypeChecker() {
+            // Propagate extension scope to each sourceFile
+            for (const node of host.getSourceFiles()) {
+                if (!node.ets_extensions) {
+                    node.ets_extensions = new Map();
+                }
+                if (!node.ets_operators) {
+                    node.ets_operators = new Map();
+                }
+                for (const other of node.statements) {
+                    if (isFunctionDeclaration(other)) {
+                        const isExtension = getAllJSDocTags(
+                            other,
+                            (tag): tag is JSDocTag =>
+                                tag.tagName.escapedText === "ets_extension"
+                        )[0];
+
+                        if (isExtension) {
+                            const typeOfSelf = getTypeOfNode(other.parameters[0]);
+                            if (typeOfSelf.symbol) {
+                                if (!node.ets_extensions.has(typeOfSelf.symbol)) {
+                                    node.ets_extensions.set(typeOfSelf.symbol, new Map());
+                                }
+                                node.ets_extensions.get(typeOfSelf.symbol)!.set(isExtension.comment as __String, other);
+                            }
+                        }
+
+                        const isOperator = getAllJSDocTags(
+                            other,
+                            (tag): tag is JSDocTag =>
+                                tag.tagName.escapedText === "ets_operator"
+                        )[0];
+
+                        if (isOperator) {
+                            const typeOfSelf = getTypeOfNode(other.parameters[0]);
+                            if (typeOfSelf.symbol) {
+                                if (!node.ets_operators.has(typeOfSelf.symbol)) {
+                                    node.ets_operators.set(typeOfSelf.symbol, new Map());
+                                }
+                                node.ets_operators.get(typeOfSelf.symbol)!.set(isOperator.comment as __String, other);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        //
+        // ETS_EXTENSION_END
+        //
+
         function initializeTypeChecker() {
             // Bind all source files and propagate errors
             for (const file of host.getSourceFiles()) {
@@ -42315,6 +42976,14 @@ namespace ts {
                 }
             });
             amalgamatedDuplicates = undefined;
+
+            //
+            // ETS_EXTENSION_BEGIN
+            //
+            initializeEtsTypeChecker();
+            //
+            // ETS_EXTENSION_END
+            //
         }
 
         function checkExternalEmitHelpers(location: Node, helpers: ExternalEmitHelpers) {

@@ -415,6 +415,7 @@ namespace ts.Completions {
     ): CompletionInfo | undefined {
         const {
             symbols,
+            extensions,
             contextToken,
             completionKind,
             isInSnippetScope,
@@ -447,6 +448,7 @@ namespace ts.Completions {
         if (isUncheckedFile(sourceFile, compilerOptions)) {
             const uniqueNames = getCompletionEntriesFromSymbols(
                 symbols,
+                extensions,
                 entries,
                 /*replacementToken*/ undefined,
                 contextToken,
@@ -477,6 +479,7 @@ namespace ts.Completions {
 
             getCompletionEntriesFromSymbols(
                 symbols,
+                extensions,
                 entries,
                 /*replacementToken*/ undefined,
                 contextToken,
@@ -1103,8 +1106,24 @@ namespace ts.Completions {
         }
     }
 
+    function getNameOfCompletionFromTag(symbol: Symbol, isExtension: boolean, def: string) {
+        if (isExtension) {
+            for (const tag of symbol.getJsDocTags()) {
+                if (tag.name === "ets_extension") {
+                    const newName = tag.text?.map(_ => _.text).join("");
+                    // @ts-expect-error
+                    console.log("HEREEE", newName);
+                    return newName || def;
+                }
+            }
+        }
+
+        return def;
+    }
+
     export function getCompletionEntriesFromSymbols(
         symbols: readonly Symbol[],
+        extensions: Set<Symbol>,
         entries: Push<CompletionEntry>,
         replacementToken: Node | undefined,
         contextToken: Node | undefined,
@@ -1155,7 +1174,7 @@ namespace ts.Completions {
                 sourceFile,
                 host,
                 program,
-                name,
+                getNameOfCompletionFromTag(symbol, extensions.has(symbol), name),
                 needsConvertPropertyAccess,
                 origin,
                 recommendedCompletion,
@@ -1311,7 +1330,7 @@ namespace ts.Completions {
             return { type: "request", request: completionData };
         }
 
-        const { symbols, literals, location, completionKind, symbolToOriginInfoMap, contextToken, previousToken, isJsxInitializer, isTypeOnlyLocation } = completionData;
+        const { symbols, extensions, literals, location, completionKind, symbolToOriginInfoMap, contextToken, previousToken, isJsxInitializer, isTypeOnlyLocation } = completionData;
 
         const literal = find(literals, l => completionNameForLiteral(sourceFile, preferences, l) === entryId.name);
         if (literal !== undefined) return { type: "literal", literal };
@@ -1323,7 +1342,15 @@ namespace ts.Completions {
         return firstDefined(symbols, (symbol, index): SymbolCompletion | undefined => {
             const origin = symbolToOriginInfoMap[index];
             const info = getCompletionEntryDisplayNameForSymbol(symbol, getEmitScriptTarget(compilerOptions), origin, completionKind, completionData.isJsxIdentifierExpected);
-            return info && info.name === entryId.name && (entryId.source === CompletionSource.ClassMemberSnippet && symbol.flags & SymbolFlags.ClassMember || getSourceFromOrigin(origin) === entryId.source)
+            let nameMatch = false;
+            if (info && extensions.has(symbol)) {
+                const name = getNameOfCompletionFromTag(symbol, /*isExtension*/ true, info.name);
+                nameMatch = name === entryId.name;
+            }
+            else if (info) {
+                nameMatch = info.name === entryId.name;
+            }
+            return nameMatch && (entryId.source === CompletionSource.ClassMemberSnippet && symbol.flags & SymbolFlags.ClassMember || getSourceFromOrigin(origin) === entryId.source)
                 ? { type: "symbol" as const, symbol, location, origin, contextToken, previousToken, isJsxInitializer, isTypeOnlyLocation }
                 : undefined;
         }) || { type: "none" };
@@ -1499,6 +1526,7 @@ namespace ts.Completions {
     interface CompletionData {
         readonly kind: CompletionDataKind.Data;
         readonly symbols: readonly Symbol[];
+        readonly extensions: Set<Symbol>;
         readonly completionKind: CompletionKind;
         readonly isInSnippetScope: boolean;
         /** Note that the presence of this alone doesn't mean that we need a conversion. Only do that if the completion is not an ordinary identifier. */
@@ -1859,6 +1887,7 @@ namespace ts.Completions {
         let hasUnresolvedAutoImports = false;
         // This also gets mutated in nested-functions after the return
         let symbols: Symbol[] = [];
+        const extensions = new Set<Symbol>();
         const symbolToOriginInfoMap: SymbolOriginInfoMap = [];
         const symbolToSortTextIdMap: SymbolSortTextIdMap = [];
         const seenPropertySymbols = new Map<SymbolId, true>();
@@ -1908,6 +1937,7 @@ namespace ts.Completions {
         return {
             kind: CompletionDataKind.Data,
             symbols,
+            extensions,
             completionKind,
             isInSnippetScope,
             propertyAccessToConvert,
@@ -2052,6 +2082,19 @@ namespace ts.Completions {
                 for (const symbol of type.getApparentProperties()) {
                     if (typeChecker.isValidPropertyAccessForCompletions(propertyAccess, type, symbol)) {
                         addPropertySymbol(symbol, /* insertAwait */ false, insertQuestionDot);
+                    }
+                }
+
+                const extensionsOfSource = getSourceFileOfNode(node).ets_extensions;
+
+                if (extensionsOfSource && type.symbol) {
+                    const extensionsOfSymbol = extensionsOfSource.get(type.symbol);
+
+                    if (extensionsOfSymbol) {
+                        extensionsOfSymbol.forEach((declaration) => {
+                            addPropertySymbol(declaration.symbol, /* insertAwait */ false, insertQuestionDot);
+                            extensions.add(declaration.symbol);
+                        });
                     }
                 }
             }

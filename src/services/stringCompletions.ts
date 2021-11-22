@@ -42,6 +42,7 @@ namespace ts.Completions.StringCompletions {
                 const entries: CompletionEntry[] = [];
                 getCompletionEntriesFromSymbols(
                     completion.symbols,
+                    new Set(),
                     entries,
                     contextToken,
                     contextToken,

@@ -3660,6 +3660,9 @@ namespace ts {
 
         /* @internal */ exportedModulesFromDeclarationEmit?: ExportedModulesFromDeclarationEmit;
         /* @internal */ endFlowNode?: FlowNode;
+
+        ets_extensions?: ESMap<Symbol, ESMap<__String, FunctionDeclaration>>;
+        ets_operators?: ESMap<Symbol, ESMap<__String, FunctionDeclaration>>;
     }
 
     /* @internal */
