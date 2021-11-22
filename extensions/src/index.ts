@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as T from "@effect-ts/core/Effect";
+import { Newtype } from "@effect-ts/core/Newtype";
 
 interface Person {
     readonly firstName: string
@@ -70,23 +71,24 @@ export const z = T.do
 
 export type Maybe = typeof x;
 
-export interface Int {
-    readonly n: number
+export interface Int extends Newtype<{readonly Int: unique symbol}, number> {}
+
+export function int(n: number): Int {
+    return n as unknown as Int;
 }
 
 /**
  * @ets_operator +
  */
-export function sum(x: Int, y: Int): Int {
-    return {
-        n: x.n + y.n
-    };
+export function add(x: Int, y: Int): Int {
+    return ((x as unknown as number) + (y as unknown as number)) as unknown as Int;
 }
 
-export function int(n: number): Int {
-    return {
-        n
-    };
+/**
+ * @ets_operator -
+ */
+export function sub(x: Int, y: Int): Int {
+    return ((x as unknown as number) - (y as unknown as number)) as unknown as Int;
 }
 
-export const xx = int(0) + int(1) + int(2) + int(5) + int(6);
+export const xx = int(0) + int(1) - int(2);

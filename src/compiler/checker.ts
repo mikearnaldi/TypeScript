@@ -8,6 +8,53 @@ namespace ts {
     let nextMergeId = 1;
     let nextFlowId = 1;
 
+    const invertedBinaryOp = {
+        [SyntaxKind.PlusToken]: "+" as __String,
+        [SyntaxKind.MinusToken]: "-" as __String,
+        [SyntaxKind.LessThanToken]: "<"as __String,
+        [SyntaxKind.GreaterThanToken]: ">" as __String,
+        [SyntaxKind.LessThanEqualsToken]: "<=" as __String,
+        [SyntaxKind.GreaterThanEqualsToken]: ">=" as __String,
+        [SyntaxKind.EqualsEqualsToken]: "==" as __String,
+        [SyntaxKind.ExclamationEqualsToken]: "!=" as __String,
+        [SyntaxKind.EqualsEqualsEqualsToken]: "===" as __String,
+        [SyntaxKind.ExclamationEqualsEqualsToken]: "!==" as __String,
+        [SyntaxKind.EqualsGreaterThanToken]: "=>" as __String,
+        [SyntaxKind.PlusToken]: "+" as __String,
+        [SyntaxKind.MinusToken]: "-" as __String,
+        [SyntaxKind.AsteriskAsteriskToken]: "**" as __String,
+        [SyntaxKind.AsteriskToken]: "*" as __String,
+        [SyntaxKind.SlashToken]: "/" as __String,
+        [SyntaxKind.PercentToken]: "%" as __String,
+        [SyntaxKind.LessThanLessThanToken]: "<<" as __String,
+        [SyntaxKind.GreaterThanGreaterThanToken]: ">>" as __String,
+        [SyntaxKind.GreaterThanGreaterThanGreaterThanToken]: ">>>" as __String,
+        [SyntaxKind.AmpersandToken]: "&" as __String,
+        [SyntaxKind.BarToken]: "|" as __String,
+        [SyntaxKind.CaretToken]: "^" as __String,
+        [SyntaxKind.ExclamationToken]: "!" as __String,
+        [SyntaxKind.TildeToken]: "~" as __String,
+        [SyntaxKind.AmpersandAmpersandToken]: "&&" as __String,
+        [SyntaxKind.BarBarToken]: "||" as __String,
+        [SyntaxKind.QuestionQuestionToken]: "??" as __String,
+        [SyntaxKind.EqualsToken]: "=" as __String,
+        [SyntaxKind.PlusEqualsToken]: "+=" as __String,
+        [SyntaxKind.MinusEqualsToken]: "-=" as __String,
+        [SyntaxKind.AsteriskEqualsToken]: "*=" as __String,
+        [SyntaxKind.AsteriskAsteriskEqualsToken]: "**=" as __String,
+        [SyntaxKind.SlashEqualsToken]: "/=" as __String,
+        [SyntaxKind.PercentEqualsToken]: "%=" as __String,
+        [SyntaxKind.LessThanLessThanEqualsToken]: "<<=" as __String,
+        [SyntaxKind.GreaterThanGreaterThanEqualsToken]: ">>=" as __String,
+        [SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken]: ">>>=" as __String,
+        [SyntaxKind.AmpersandEqualsToken]: "&=" as __String,
+        [SyntaxKind.BarEqualsToken]: "|=" as __String,
+        [SyntaxKind.CaretEqualsToken]: "^=" as __String,
+        [SyntaxKind.BarBarEqualsToken]: "||=" as __String,
+        [SyntaxKind.AmpersandAmpersandEqualsToken]: "&&=" as __String,
+        [SyntaxKind.QuestionQuestionEqualsToken]: "??=" as __String
+    } as const;
+
     const enum IterationUse {
         AllowsSyncIterablesFlag = 1 << 0,
         AllowsAsyncIterablesFlag = 1 << 1,
@@ -32998,14 +33045,8 @@ namespace ts {
             return (node: BinaryExpression, checkMode: CheckMode | undefined) => {
                 const leftType = getTypeOfNode(node.left);
 
-                let operator: __String | undefined = void 0;
-
-                switch (node.operatorToken.kind) {
-                    case SyntaxKind.PlusToken: {
-                        operator = "+" as __String;
-                        break;
-                    }
-                }
+                // @ts-expect-error
+                const operator: __String | undefined = invertedBinaryOp[node.operatorToken.kind];
 
                 if (operator && leftType.symbol) {
                     fillUpScope(getSourceFileOfNode(node));
@@ -40590,6 +40631,10 @@ namespace ts {
             tracing?.pop();
         }
 
+        //
+        // EXTENSION
+        //
+
         let scopeIsFilledUp = false;
 
         function fillUpScope(node: SourceFile) {
@@ -40597,9 +40642,7 @@ namespace ts {
                 return;
             }
             scopeIsFilledUp = true;
-            //
-            // EXTENSION
-            //
+
             for (const other of node.statements) {
                 if (isFunctionDeclaration(other)) {
                     const isExtension = getAllJSDocTags(
@@ -40635,10 +40678,10 @@ namespace ts {
                     }
                 }
             }
-            //
-            // EXTENSION_END
-            //
         }
+        //
+        // EXTENSION_END
+        //
 
         function checkSourceFile(node: SourceFile) {
             tracing?.push(tracing.Phase.Check, "checkSourceFile", { path: node.path }, /*separateBeginAndEnd*/ true);
