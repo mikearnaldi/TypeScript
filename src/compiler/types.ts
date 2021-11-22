@@ -4909,6 +4909,8 @@ namespace ts {
         /* @internal */ isReplaceableByMethod?: boolean; // Can this Javascript class property be replaced by a method symbol?
         /* @internal */ isAssigned?: boolean;   // True if the symbol is a parameter with assignments
         /* @internal */ assignmentDeclarationMembers?: ESMap<number, Declaration>; // detected late-bound assignment declarations associated with the symbol
+        ets_extensions?: ESMap<__String, FunctionDeclaration>;
+        ets_operators?: ESMap<__String, FunctionDeclaration>;
     }
 
     /* @internal */

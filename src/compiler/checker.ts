@@ -28308,7 +28308,55 @@ namespace ts {
                 && getThisContainer(node, /*includeArrowFunctions*/ true) === getDeclaringConstructor(prop);
         }
 
+        //
+        // EXTENSION
+        //
         function checkPropertyAccessExpressionOrQualifiedName(node: PropertyAccessExpression | QualifiedName, left: Expression | QualifiedName, leftType: Type, right: Identifier | PrivateIdentifier, checkMode: CheckMode | undefined) {
+            const inType = getPropertiesOfType(leftType).findIndex((p) => p.escapedName === right.escapedText) !== -1;
+
+            if (
+                !inType &&
+                isCallExpression(node.parent) &&
+                leftType.symbol
+            ) {
+                fillUpScope(getSourceFileOfNode(node));
+
+                if (leftType.symbol.ets_extensions && leftType.symbol.ets_extensions.has(right.escapedText)) {
+                    const other = leftType.symbol.ets_extensions.get(right.escapedText)!;
+                    const originalType = getTypeOfNode(other) as ObjectType;
+                    const sig = getSignaturesOfType(originalType, SignatureKind.Call)[0]!;
+                    const targetParam = sig.parameters[0];
+                    const targetParamType = getTypeOfNode(targetParam.valueDeclaration!);
+                    if (leftType.symbol === targetParamType.symbol) {
+                        const thisNew = createSymbol(targetParam.flags, "this" as __String);
+                        thisNew.type = targetParamType;
+                        return createAnonymousType(
+                            other.symbol,
+                            emptySymbols,
+                            [createSignature(
+                                sig.declaration,
+                                sig.typeParameters,
+                                thisNew,
+                                sig.parameters.slice(1, sig.parameters.length),
+                                sig.resolvedReturnType,
+                                sig.resolvedTypePredicate,
+                                sig.minArgumentCount - 1,
+                                sig.flags
+                            )],
+                            [],
+                            []
+                        );
+                    }
+                }
+            }
+
+            return checkPropertyAccessExpressionOrQualifiedNameOriginal(node, left, leftType, right, checkMode);
+        }
+
+        function checkPropertyAccessExpressionOrQualifiedNameOriginal(node: PropertyAccessExpression | QualifiedName, left: Expression | QualifiedName, leftType: Type, right: Identifier | PrivateIdentifier, checkMode: CheckMode | undefined) {
+            //
+            // EXTENSION_END
+            //
             const parentSymbol = getNodeLinks(left).resolvedSymbol;
             const assignmentKind = getAssignmentTargetKind(node);
             const apparentType = getApparentType(assignmentKind !== AssignmentKind.None || isMethodAccessForCall(node) ? getWidenedType(leftType) : leftType);
@@ -31010,16 +31058,12 @@ namespace ts {
                 return isObjectLiteralExpression(right) && right;
             }
         }
-
         /**
          * Syntactically and semantically checks a call or new expression.
          * @param node The call/new expression to be checked.
          * @returns On success, the expression's signature's return type. On failure, anyType.
          */
-        function checkCallExpression(node: CallExpression | NewExpression, checkMode?: CheckMode): Type {
-            if (!checkGrammarTypeArguments(node, node.typeArguments)) checkGrammarArguments(node.arguments);
-
-            const signature = getResolvedSignature(node, /*candidatesOutArray*/ undefined, checkMode);
+        function checkCallExpressionNoGrammar(node: CallExpression | NewExpression, signature: Signature): Type {
             if (signature === resolvingSignature) {
                 // CheckMode.SkipGenericFunctions is enabled and this is a call to a generic function that
                 // returns a function type. We defer checking and return nonInferrableType.
@@ -31082,6 +31126,54 @@ namespace ts {
             }
 
             return returnType;
+        }
+
+        /**
+         * Semantically checks operator
+         */
+        function checkOperator(declaration: FunctionDeclaration, _left: Expression, _right: Expression, checkMode: CheckMode | undefined): Type {
+            const funcType = getTypeOfNode(declaration);
+            const apparentType = getApparentType(funcType);
+            const candidate = getSignaturesOfType(apparentType, SignatureKind.Call)[0]!;
+            const node = factory.createCallExpression(
+                declaration.name!,
+                [],
+                [_left, _right]
+            );
+
+            if (checkMode && (checkMode & CheckMode.IsForSignatureHelp)) {
+                return getReturnTypeOfSignature(candidate);
+            }
+
+            const digs = getSignatureApplicabilityError(
+                node,
+                [_left, _right],
+                candidate,
+                assignableRelation,
+                CheckMode.Normal,
+                /*reportErrors*/ true,
+                /*containingMessageChain*/ void 0
+            );
+
+            if (digs) {
+                digs.forEach((dig) => {
+                    diagnostics.add(dig);
+                });
+                return errorType;
+            }
+
+            return getReturnTypeOfSignature(candidate);
+        }
+
+        /**
+         * Syntactically and semantically checks a call or new expression.
+         * @param node The call/new expression to be checked.
+         * @returns On success, the expression's signature's return type. On failure, anyType.
+         */
+        function checkCallExpression(node: CallExpression | NewExpression, checkMode?: CheckMode): Type {
+            if (!checkGrammarTypeArguments(node, node.typeArguments)) checkGrammarArguments(node.arguments);
+
+            return checkCallExpressionNoGrammar(node, getResolvedSignature(node, /*candidatesOutArray*/ undefined, checkMode));
         }
 
         function checkDeprecatedSignature(signature: Signature, node: CallLikeExpression) {
@@ -32904,6 +32996,25 @@ namespace ts {
             const trampoline = createBinaryExpressionTrampoline(onEnter, onLeft, onOperator, onRight, onExit, foldState);
 
             return (node: BinaryExpression, checkMode: CheckMode | undefined) => {
+                const leftType = getTypeOfNode(node.left);
+
+                let operator: __String | undefined = void 0;
+
+                switch (node.operatorToken.kind) {
+                    case SyntaxKind.PlusToken: {
+                        operator = "+" as __String;
+                        break;
+                    }
+                }
+
+                if (operator && leftType.symbol) {
+                    fillUpScope(getSourceFileOfNode(node));
+                    if (leftType.symbol.ets_operators && leftType.symbol.ets_operators.has(operator)) {
+                        const op = leftType.symbol.ets_operators.get(operator)!;
+                        return checkOperator(op, node.left, node.right, checkMode);
+                    }
+                }
+
                 const result = trampoline(node, checkMode);
                 Debug.assertIsDefined(result);
                 return result;
@@ -40477,6 +40588,56 @@ namespace ts {
             }
             currentNode = saveCurrentNode;
             tracing?.pop();
+        }
+
+        let scopeIsFilledUp = false;
+
+        function fillUpScope(node: SourceFile) {
+            if (scopeIsFilledUp) {
+                return;
+            }
+            scopeIsFilledUp = true;
+            //
+            // EXTENSION
+            //
+            for (const other of node.statements) {
+                if (isFunctionDeclaration(other)) {
+                    const isExtension = getAllJSDocTags(
+                        other,
+                        (tag): tag is JSDocTag =>
+                            tag.tagName.escapedText === "ets_extension"
+                    )[0];
+
+                    if (isExtension) {
+                        const typeOfSelf = getTypeOfNode(other.parameters[0]);
+                        if (typeOfSelf.symbol) {
+                            if (!typeOfSelf.symbol.ets_extensions) {
+                                typeOfSelf.symbol.ets_extensions = new Map();
+                            }
+                            typeOfSelf.symbol.ets_extensions.set(isExtension.comment as __String, other);
+                        }
+                    }
+
+                    const isOperator = getAllJSDocTags(
+                        other,
+                        (tag): tag is JSDocTag =>
+                            tag.tagName.escapedText === "ets_operator"
+                    )[0];
+
+                    if (isOperator) {
+                        const typeOfSelf = getTypeOfNode(other.parameters[0]);
+                        if (typeOfSelf.symbol) {
+                            if (!typeOfSelf.symbol.ets_operators) {
+                                typeOfSelf.symbol.ets_operators = new Map();
+                            }
+                            typeOfSelf.symbol.ets_operators.set(isOperator.comment as __String, other);
+                        }
+                    }
+                }
+            }
+            //
+            // EXTENSION_END
+            //
         }
 
         function checkSourceFile(node: SourceFile) {
